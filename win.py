@@ -1,34 +1,19 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import sqlite3
 import re
 
 # --- 기본 설정 ---
 st.set_page_config(page_title="Dữ Liệu Dashboard", layout="wide")
 
-# --- 데이터베이스 초기화 (SQLite) ---
-conn = sqlite3.connect('dashboard_data.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''
-    CREATE TABLE IF NOT EXISTS records (
-        year INTEGER, month INTEGER, unit TEXT, region TEXT, 
-        supermarket TEXT, product TEXT, sales REAL, inventory REAL,
-        UNIQUE(year, month, unit, region, supermarket, product)
-    )
-''')
-conn.commit()
-
 # --- 사이드바: 데이터 업로드 (멀티 파일) ---
 st.sidebar.title("☁️ Tải lên dữ liệu")
 st.sidebar.caption("Bạn có thể kéo thả nhiều tệp cùng lúc (여러 파일을 한 번에 드래그하세요)")
 
-# 파일명에서 날짜를 못 찾을 경우 사용할 기본값
-upload_year = st.sidebar.selectbox("Năm mặc định (기본 연도)", [2023, 2024, 2025, 2026, 2027], index=2)
-upload_month = st.sidebar.selectbox("Tháng mặc định (기본 월)", list(range(1, 13)), index=0)
-
-# accept_multiple_files=True 로 여러 파일 동시 업로드 허용
+# 멀티 파일 업로더만 남김 (기본 연도/월 선택 메뉴 삭제)
 uploaded_files = st.sidebar.file_uploader("Chọn tệp Excel (Kéo thả nhiều tệp)", type=['xlsx', 'xls'], accept_multiple_files=True)
+
+all_data = [] # 업로드된 모든 데이터를 임시로 담을 리스트
 
 if uploaded_files:
     for uploaded_file in uploaded_files:
@@ -39,8 +24,14 @@ if uploaded_files:
                 file_month = int(match.group(1))
                 file_year = int(match.group(2))
             else:
-                file_month = upload_month
-                file_year = upload_year
+                # 못 찾을 경우 파일명 앞의 숫자 6자리(예: 202501)에서 추출 시도
+                alt_match = re.search(r'^(20\d{2})(\d{2})', uploaded_file.name)
+                if alt_match:
+                    file_year = int(alt_match.group(1))
+                    file_month = int(alt_match.group(2))
+                else:
+                    file_month = 1
+                    file_year = 2025 # 기본값
 
             # 2. 엑셀 파일 읽기
             xls = pd.ExcelFile(uploaded_file)
@@ -70,23 +61,23 @@ if uploaded_files:
                 if 'sales' not in df_grouped.columns: df_grouped['sales'] = 0
                 if 'inventory' not in df_grouped.columns: df_grouped['inventory'] = 0
 
-                # DB에 저장
-                for _, row in df_grouped.iterrows():
-                    c.execute('''
-                        INSERT OR REPLACE INTO records 
-                        (year, month, unit, region, supermarket, product, sales, inventory)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (file_year, file_month, str(row['unit']), str(row['region']), 
-                          str(row['supermarket']), str(row['product']), float(row['sales']), float(row['inventory'])))
-                conn.commit()
-                st.sidebar.success(f"✅ {uploaded_file.name} (T{file_month}/{file_year}) 저장 완료")
+                # 연도와 월 정보 추가
+                df_grouped['year'] = file_year
+                df_grouped['month'] = file_month
+
+                # 리스트에 추가 (DB 저장 없음)
+                all_data.append(df_grouped)
+                st.sidebar.success(f"✅ {uploaded_file.name} 처리 완료")
             else:
                 st.sidebar.error(f"❌ {uploaded_file.name}: Không tìm thấy sheet Bán/Tồn.")
         except Exception as e:
             st.sidebar.error(f"❌ Lỗi ({uploaded_file.name}): {e}")
 
-# --- DB에서 전체 데이터 불러오기 ---
-df = pd.read_sql_query("SELECT * FROM records", conn)
+# 업로드된 데이터들을 하나의 표로 합치기
+if all_data:
+    df = pd.concat(all_data, ignore_index=True)
+else:
+    df = pd.DataFrame(columns=['year', 'month', 'unit', 'region', 'supermarket', 'product', 'sales', 'inventory'])
 
 # --- 메인 화면 ---
 st.title("📊 Dữ Liệu Dashboard (Bán hàng & Tồn kho)")
@@ -112,9 +103,12 @@ else:
 
     # 필터 적용
     filtered_df = df[
-        (df['year'].isin(f_year)) & (df['month'].isin(f_month)) &
-        (df['unit'].isin(f_unit)) & (df['region'].isin(f_region)) &
-        (df['supermarket'].isin(f_supermarket)) & (df['product'].isin(f_product))
+        (df['year'].isin(f_year) if f_year else True) &
+        (df['month'].isin(f_month) if f_month else True) &
+        (df['unit'].isin(f_unit) if f_unit else True) &
+        (df['region'].isin(f_region) if f_region else True) &
+        (df['supermarket'].isin(f_supermarket) if f_supermarket else True) &
+        (df['product'].isin(f_product) if f_product else True)
     ]
 
     # --- KPI 및 합계 계산 ---
@@ -130,7 +124,6 @@ else:
     # --- 데이터 표 (상세 내역 대신 합계만 표시) ---
     st.subheader("Bảng tổng hợp (필터링된 데이터 합계)")
     
-    # 1줄짜리 요약 데이터프레임 생성
     summary_data = {
         'Phân loại (구분)': ['Tổng cộng (합계)'],
         'Tổng Bán (총 판매)': [f"{total_sales:,.0f}"],
@@ -138,14 +131,14 @@ else:
         'Tháng tồn kho (재고개월수)': [f"{stock_months:.1f}"]
     }
     summary_df = pd.DataFrame(summary_data)
-    
-    # 요약 표 출력
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     # --- 그래프 ---
     st.subheader("Biểu đồ xu hướng (월별 추이)")
     if not filtered_df.empty:
         trend_df = filtered_df.groupby(['year', 'month'])[['sales', 'inventory']].sum().reset_index()
+        # 연도와 월 순서대로 정렬
+        trend_df = trend_df.sort_values(by=['year', 'month'])
         trend_df['label'] = trend_df.apply(lambda x: f"T{int(x['month'])}/{int(x['year'])}", axis=1)
         
         fig = go.Figure()
