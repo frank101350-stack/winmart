@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import sqlite3
-import io
+import re
 
 # --- 기본 설정 ---
 st.set_page_config(page_title="Dữ Liệu Dashboard", layout="wide")
@@ -19,57 +19,71 @@ c.execute('''
 ''')
 conn.commit()
 
-# --- 사이드바: 데이터 업로드 ---
-st.sidebar.title("☁️ Tải lên dữ liệu (업로드)")
-upload_year = st.sidebar.selectbox("Chọn năm (연도)", [2023, 2024, 2025, 2026, 2027], index=2)
-upload_month = st.sidebar.selectbox("Chọn tháng (월)", list(range(1, 13)), index=0)
-uploaded_file = st.sidebar.file_uploader("Chọn tệp Excel", type=['xlsx', 'xls'])
+# --- 사이드바: 데이터 업로드 (멀티 파일) ---
+st.sidebar.title("☁️ Tải lên dữ liệu")
+st.sidebar.caption("Bạn có thể kéo thả nhiều tệp cùng lúc (여러 파일을 한 번에 드래그하세요)")
 
-if uploaded_file is not None:
-    try:
-        xls = pd.ExcelFile(uploaded_file)
-        sales_sheet = next((s for s in xls.sheet_names if 'bán' in s.lower() or '판매' in s.lower()), None)
-        inv_sheet = next((s for s in xls.sheet_names if 'tồn' in s.lower() or '재고' in s.lower()), None)
+# 파일명에서 날짜를 못 찾을 경우 사용할 기본값
+upload_year = st.sidebar.selectbox("Năm mặc định (기본 연도)", [2023, 2024, 2025, 2026, 2027], index=2)
+upload_month = st.sidebar.selectbox("Tháng mặc định (기본 월)", list(range(1, 13)), index=0)
 
-        if sales_sheet and inv_sheet:
-            # 판매 데이터 읽기 (필요한 열 추출)
-            df_sales = pd.read_excel(uploaded_file, sheet_name=sales_sheet, header=1)
-            df_sales = df_sales.iloc[:, [0, 1, 3, 5, 6]].dropna(subset=[df_sales.columns[0]])
-            df_sales.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
-            df_sales['type'] = 'sales'
+# accept_multiple_files=True 로 여러 파일 동시 업로드 허용
+uploaded_files = st.sidebar.file_uploader("Chọn tệp Excel (Kéo thả nhiều tệp)", type=['xlsx', 'xls'], accept_multiple_files=True)
 
-            # 재고 데이터 읽기
-            df_inv = pd.read_excel(uploaded_file, sheet_name=inv_sheet, header=1)
-            df_inv = df_inv.iloc[:, [0, 1, 3, 5, 6]].dropna(subset=[df_inv.columns[0]])
-            df_inv.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
-            df_inv['type'] = 'inventory'
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        try:
+            # 1. 파일명에서 연도/월 자동 추출 시도 (예: "tháng 01.2025")
+            match = re.search(r'tháng\s*(\d{1,2})\.?(\d{4})', uploaded_file.name.lower())
+            if match:
+                file_month = int(match.group(1))
+                file_year = int(match.group(2))
+            else:
+                file_month = upload_month
+                file_year = upload_year
 
-            # 데이터 병합 및 집계
-            df_combined = pd.concat([df_sales, df_inv])
-            df_combined = df_combined.fillna('Khác')
-            
-            df_grouped = df_combined.pivot_table(
-                index=['unit', 'region', 'supermarket', 'product'], 
-                columns='type', values='qty', aggfunc='sum', fill_value=0
-            ).reset_index()
+            # 2. 엑셀 파일 읽기
+            xls = pd.ExcelFile(uploaded_file)
+            sales_sheet = next((s for s in xls.sheet_names if 'bán' in s.lower() or '판매' in s.lower()), None)
+            inv_sheet = next((s for s in xls.sheet_names if 'tồn' in s.lower() or '재고' in s.lower()), None)
 
-            if 'sales' not in df_grouped.columns: df_grouped['sales'] = 0
-            if 'inventory' not in df_grouped.columns: df_grouped['inventory'] = 0
+            if sales_sheet and inv_sheet:
+                # 판매 데이터
+                df_sales = pd.read_excel(uploaded_file, sheet_name=sales_sheet, header=1)
+                df_sales = df_sales.iloc[:, [0, 1, 3, 5, 6]].dropna(subset=[df_sales.columns[0]])
+                df_sales.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
+                df_sales['type'] = 'sales'
 
-            # DB에 저장 (기존 데이터가 있으면 덮어쓰기)
-            for _, row in df_grouped.iterrows():
-                c.execute('''
-                    INSERT OR REPLACE INTO records 
-                    (year, month, unit, region, supermarket, product, sales, inventory)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (upload_year, upload_month, str(row['unit']), str(row['region']), 
-                      str(row['supermarket']), str(row['product']), float(row['sales']), float(row['inventory'])))
-            conn.commit()
-            st.sidebar.success(f"Tải lên dữ liệu Tháng {upload_month}/{upload_year} thành công!")
-        else:
-            st.sidebar.error("Không tìm thấy sheet Bán hoặc Tồn.")
-    except Exception as e:
-        st.sidebar.error(f"Lỗi: {e}")
+                # 재고 데이터
+                df_inv = pd.read_excel(uploaded_file, sheet_name=inv_sheet, header=1)
+                df_inv = df_inv.iloc[:, [0, 1, 3, 5, 6]].dropna(subset=[df_inv.columns[0]])
+                df_inv.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
+                df_inv['type'] = 'inventory'
+
+                # 병합 및 피벗
+                df_combined = pd.concat([df_sales, df_inv]).fillna('Khác')
+                df_grouped = df_combined.pivot_table(
+                    index=['unit', 'region', 'supermarket', 'product'], 
+                    columns='type', values='qty', aggfunc='sum', fill_value=0
+                ).reset_index()
+
+                if 'sales' not in df_grouped.columns: df_grouped['sales'] = 0
+                if 'inventory' not in df_grouped.columns: df_grouped['inventory'] = 0
+
+                # DB에 저장
+                for _, row in df_grouped.iterrows():
+                    c.execute('''
+                        INSERT OR REPLACE INTO records 
+                        (year, month, unit, region, supermarket, product, sales, inventory)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (file_year, file_month, str(row['unit']), str(row['region']), 
+                          str(row['supermarket']), str(row['product']), float(row['sales']), float(row['inventory'])))
+                conn.commit()
+                st.sidebar.success(f"✅ {uploaded_file.name} (T{file_month}/{file_year}) 저장 완료")
+            else:
+                st.sidebar.error(f"❌ {uploaded_file.name}: Không tìm thấy sheet Bán/Tồn.")
+        except Exception as e:
+            st.sidebar.error(f"❌ Lỗi ({uploaded_file.name}): {e}")
 
 # --- DB에서 전체 데이터 불러오기 ---
 df = pd.read_sql_query("SELECT * FROM records", conn)
@@ -78,7 +92,7 @@ df = pd.read_sql_query("SELECT * FROM records", conn)
 st.title("📊 Dữ Liệu Dashboard (Bán hàng & Tồn kho)")
 
 if df.empty:
-    st.info("Không có dữ liệu. Vui lòng tải tệp Excel lên từ thanh bên trái.")
+    st.info("Không có dữ liệu. Vui lòng kéo thả tệp Excel lên từ thanh bên trái.")
 else:
     # --- 사이드바: 필터 ---
     st.sidebar.markdown("---")
@@ -103,7 +117,7 @@ else:
         (df['supermarket'].isin(f_supermarket)) & (df['product'].isin(f_product))
     ]
 
-    # --- KPI 요약 ---
+    # --- KPI 및 합계 계산 ---
     total_sales = filtered_df['sales'].sum()
     total_inv = filtered_df['inventory'].sum()
     stock_months = (total_inv / total_sales) if total_sales > 0 else 0
@@ -113,29 +127,27 @@ else:
     col2.metric("Tổng số lượng bán (총 판매)", f"{total_sales:,.0f}")
     col3.metric("Tổng tồn kho (총 재고)", f"{total_inv:,.0f}", f"{stock_months:.1f} tháng tồn")
 
-    # --- 데이터 표 ---
-    st.subheader("Bảng dữ liệu chi tiết")
-    # 재고개월수 열 추가
-    filtered_df['Tháng tồn kho'] = filtered_df.apply(
-        lambda x: round(x['inventory'] / x['sales'], 1) if x['sales'] > 0 else 0, axis=1
-    )
+    # --- 데이터 표 (상세 내역 대신 합계만 표시) ---
+    st.subheader("Bảng tổng hợp (필터링된 데이터 합계)")
     
-    # 열 이름 베트남어 변경
-    display_df = filtered_df.rename(columns={
-        'year': 'Năm', 'month': 'Tháng', 'unit': 'Đơn vị', 'region': 'Khu vực', 
-        'supermarket': 'Siêu thị', 'product': 'Sản phẩm', 
-        'sales': 'Bán', 'inventory': 'Tồn kho'
-    })
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    # 1줄짜리 요약 데이터프레임 생성
+    summary_data = {
+        'Phân loại (구분)': ['Tổng cộng (합계)'],
+        'Tổng Bán (총 판매)': [f"{total_sales:,.0f}"],
+        'Tổng Tồn kho (총 재고)': [f"{total_inv:,.0f}"],
+        'Tháng tồn kho (재고개월수)': [f"{stock_months:.1f}"]
+    }
+    summary_df = pd.DataFrame(summary_data)
+    
+    # 요약 표 출력
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     # --- 그래프 ---
     st.subheader("Biểu đồ xu hướng (월별 추이)")
     if not filtered_df.empty:
-        # 월별 집계
         trend_df = filtered_df.groupby(['year', 'month'])[['sales', 'inventory']].sum().reset_index()
         trend_df['label'] = trend_df.apply(lambda x: f"T{int(x['month'])}/{int(x['year'])}", axis=1)
         
-        # Plotly 혼합 차트 (막대: 재고, 선: 판매)
         fig = go.Figure()
         fig.add_trace(go.Bar(x=trend_df['label'], y=trend_df['inventory'], name='Tồn kho (재고)', marker_color='#f59e0b'))
         fig.add_trace(go.Scatter(x=trend_df['label'], y=trend_df['sales'], name='Bán hàng (판매)', mode='lines+markers', line=dict(color='#10b981', width=3)))
