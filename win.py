@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import re
+import unicodedata
 
 # --- 기본 설정 ---
 st.set_page_config(page_title="Dữ Liệu Dashboard", layout="wide")
@@ -14,10 +15,16 @@ uploaded_files = st.sidebar.file_uploader("Chọn tệp Excel (Kéo thả nhiề
 
 all_data = [] 
 
+# 베트남어 성조 제거 및 소문자 변환 함수 (시트 이름을 유연하게 찾기 위함)
+def normalize_text(text):
+    if not isinstance(text, str):
+        return str(text)
+    return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8').lower()
+
 if uploaded_files:
     for uploaded_file in uploaded_files:
         try:
-            # 1. 파일명에서 연도/월 자동 추출 시도
+            # 1. 파일명에서 연도/월 자동 추출
             match = re.search(r'tháng\s*(\d{1,2})\.?(\d{4})', uploaded_file.name.lower())
             if match:
                 file_month = int(match.group(1))
@@ -33,32 +40,53 @@ if uploaded_files:
 
             # 2. 엑셀 파일 읽기
             xls = pd.ExcelFile(uploaded_file)
-            sales_sheet = next((s for s in xls.sheet_names if 'bán' in s.lower() or '판매' in s.lower()), None)
-            inv_sheet = next((s for s in xls.sheet_names if 'tồn' in s.lower() or '재고' in s.lower()), None)
+            
+            sales_sheet = None
+            inv_sheet = None
+            
+            # 시트 이름 유연하게 찾기 (성조 무시)
+            for sheet in xls.sheet_names:
+                s_norm = normalize_text(sheet)
+                if 'ban' in s_norm or '판매' in s_norm or 'sales' in s_norm:
+                    sales_sheet = sheet
+                elif 'ton' in s_norm or '재고' in s_norm or 'stock' in s_norm:
+                    inv_sheet = sheet
 
             if sales_sheet and inv_sheet:
-                # 판매 데이터
-                df_sales = pd.read_excel(uploaded_file, sheet_name=sales_sheet, header=1)
-                df_sales = df_sales.iloc[:, [0, 1, 3, 5, 6]].dropna(subset=[df_sales.columns[0]])
-                df_sales.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
-                df_sales['type'] = 'sales'
+                # 데이터를 안전하게 처리하는 내부 함수
+                def process_sheet(sheet_name, data_type):
+                    df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=1)
+                    
+                    # 필수 열(0, 1, 3, 5, 6) 추출
+                    cols = [0, 1, 3, 5, 6]
+                    df = df.iloc[:, cols]
+                    df.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
+                    
+                    # 텍스트 열 안전하게 변환 (에러 원인 해결)
+                    for col in ['unit', 'region', 'supermarket', 'product']:
+                        df[col] = df[col].astype(str)
+                        # nan 문자열이나 빈칸을 'Khác(기타)'로 변경
+                        df.loc[df[col] == 'nan', col] = 'Khác'
+                        df.loc[df[col] == '', col] = 'Khác'
+                        
+                    # 수량 열 강제 숫자 변환
+                    df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
+                    df['type'] = data_type
+                    return df
 
-                # 재고 데이터
-                df_inv = pd.read_excel(uploaded_file, sheet_name=inv_sheet, header=1)
-                df_inv = df_inv.iloc[:, [0, 1, 3, 5, 6]].dropna(subset=[df_inv.columns[0]])
-                df_inv.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
-                df_inv['type'] = 'inventory'
+                # 판매와 재고 각각 처리
+                df_sales = process_sheet(sales_sheet, 'sales')
+                df_inv = process_sheet(inv_sheet, 'inventory')
 
-                # 병합 및 피벗 (결측치는 'Khác'으로 채우고 모든 기준열을 문자로 강제 변환)
-                df_combined = pd.concat([df_sales, df_inv]).fillna('Khác')
-                for col in ['unit', 'region', 'supermarket', 'product']:
-                    df_combined[col] = df_combined[col].astype(str)
-
+                # 병합 및 피벗
+                df_combined = pd.concat([df_sales, df_inv], ignore_index=True)
+                
                 df_grouped = df_combined.pivot_table(
                     index=['unit', 'region', 'supermarket', 'product'], 
                     columns='type', values='qty', aggfunc='sum', fill_value=0
                 ).reset_index()
 
+                # 누락된 컬럼이 있을 경우 방지
                 if 'sales' not in df_grouped.columns: df_grouped['sales'] = 0
                 if 'inventory' not in df_grouped.columns: df_grouped['inventory'] = 0
 
@@ -66,10 +94,10 @@ if uploaded_files:
                 df_grouped['year'] = file_year
                 df_grouped['month'] = file_month
 
-                # 리스트에 추가 (성공 메시지 st.sidebar.success 제거)
+                # 리스트에 데이터 추가
                 all_data.append(df_grouped)
             else:
-                st.sidebar.error(f"❌ {uploaded_file.name}: Không tìm thấy sheet Bán/Tồn.")
+                st.sidebar.error(f"❌ {uploaded_file.name}: Không tìm thấy sheet Bán/Tồn (판매/재고 시트를 찾을 수 없음)")
         except Exception as e:
             st.sidebar.error(f"❌ Lỗi ({uploaded_file.name}): {e}")
 
@@ -90,7 +118,6 @@ else:
     st.sidebar.title("🔍 Bộ lọc (필터)")
     
     def multiselect_filter(label, col_name):
-        # TypeError 해결: key=str을 추가하여 숫자와 문자가 섞여 있어도 안전하게 정렬되도록 수정
         options = sorted(df[col_name].unique(), key=str)
         selected = st.sidebar.multiselect(label, options, default=[])
         return selected if selected else options
