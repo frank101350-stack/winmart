@@ -24,8 +24,8 @@ def normalize_text(text):
 if uploaded_files:
     for uploaded_file in uploaded_files:
         try:
-            # 1. 파일명에서 연도/월 자동 추출
-            match = re.search(r'tháng\s*(\d{1,2})\.?(\d{4})', uploaded_file.name.lower())
+            # 1. 파일명에서 연도/월 완벽 자동 추출 (예: "Tháng 9.2026", "tháng 10.2026")
+            match = re.search(r'th[aá]ng\s*(\d{1,2})\.?(\d{4})', uploaded_file.name.lower())
             if match:
                 file_month = int(match.group(1))
                 file_year = int(match.group(2))
@@ -44,7 +44,6 @@ if uploaded_files:
             sales_sheet = None
             inv_sheet = None
             
-            # 시트 이름 유연하게 찾기 (성조 무시)
             for sheet in xls.sheet_names:
                 s_norm = normalize_text(sheet)
                 if 'ban' in s_norm or '판매' in s_norm or 'sales' in s_norm:
@@ -55,22 +54,30 @@ if uploaded_files:
             if sales_sheet and inv_sheet:
                 # 데이터를 안전하게 처리하는 내부 함수
                 def process_sheet(sheet_name, data_type):
-                    df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=1)
+                    # header=0 으로 설정하여 데이터 밀림 방지 (숫자 ID 대신 이름 추출)
+                    df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=0)
                     
-                    # 필수 열(0, 1, 3, 5, 6) 추출
+                    if len(df.columns) < 7:
+                        return pd.DataFrame()
+                        
+                    # 반드시 0(구분), 1(지역), 3(슈퍼이름), 5(제품이름), 6(수량) 열만 추출
                     cols = [0, 1, 3, 5, 6]
-                    df = df.iloc[:, cols]
+                    df = df.iloc[:, cols].copy()
                     df.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
                     
-                    # 텍스트 열 안전하게 변환 (에러 원인 해결)
+                    # 수량 열을 가장 먼저 완벽한 숫자로 변환
+                    df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0).astype(float)
+                    
+                    # 텍스트 열 안전하게 변환 및 빈칸 처리
                     for col in ['unit', 'region', 'supermarket', 'product']:
-                        df[col] = df[col].astype(str)
-                        # nan 문자열이나 빈칸을 'Khác(기타)'로 변경
-                        df.loc[df[col] == 'nan', col] = 'Khác'
+                        df[col] = df[col].fillna('Khác').astype(str)
+                        df.loc[df[col].str.lower() == 'nan', col] = 'Khác'
                         df.loc[df[col] == '', col] = 'Khác'
                         
-                    # 수량 열 강제 숫자 변환
-                    df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
+                    # 지역 정보 필터링: Bắc, Trung, Nam 이 포함된 유효한 데이터만 남김 (쓰레기값 제거)
+                    valid_mask = df['region'].str.lower().str.contains('bắc|trung|nam', na=False, regex=True)
+                    df = df[valid_mask].copy()
+                    
                     df['type'] = data_type
                     return df
 
@@ -81,21 +88,19 @@ if uploaded_files:
                 # 병합 및 피벗
                 df_combined = pd.concat([df_sales, df_inv], ignore_index=True)
                 
-                df_grouped = df_combined.pivot_table(
-                    index=['unit', 'region', 'supermarket', 'product'], 
-                    columns='type', values='qty', aggfunc='sum', fill_value=0
-                ).reset_index()
+                if not df_combined.empty:
+                    df_grouped = df_combined.pivot_table(
+                        index=['unit', 'region', 'supermarket', 'product'], 
+                        columns='type', values='qty', aggfunc='sum', fill_value=0
+                    ).reset_index()
 
-                # 누락된 컬럼이 있을 경우 방지
-                if 'sales' not in df_grouped.columns: df_grouped['sales'] = 0
-                if 'inventory' not in df_grouped.columns: df_grouped['inventory'] = 0
+                    if 'sales' not in df_grouped.columns: df_grouped['sales'] = 0
+                    if 'inventory' not in df_grouped.columns: df_grouped['inventory'] = 0
 
-                # 연도와 월 정보 추가
-                df_grouped['year'] = file_year
-                df_grouped['month'] = file_month
+                    df_grouped['year'] = file_year
+                    df_grouped['month'] = file_month
 
-                # 리스트에 데이터 추가
-                all_data.append(df_grouped)
+                    all_data.append(df_grouped)
             else:
                 st.sidebar.error(f"❌ {uploaded_file.name}: Không tìm thấy sheet Bán/Tồn (판매/재고 시트를 찾을 수 없음)")
         except Exception as e:
@@ -165,7 +170,6 @@ else:
     st.subheader("Biểu đồ xu hướng (월별 추이)")
     if not filtered_df.empty:
         trend_df = filtered_df.groupby(['year', 'month'])[['sales', 'inventory']].sum().reset_index()
-        # 연도와 월 순서대로 정렬
         trend_df = trend_df.sort_values(by=['year', 'month'])
         trend_df['label'] = trend_df.apply(lambda x: f"T{int(x['month'])}/{int(x['year'])}", axis=1)
         
