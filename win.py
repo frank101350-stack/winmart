@@ -10,28 +10,26 @@ st.set_page_config(page_title="Dữ Liệu Dashboard", layout="wide")
 st.sidebar.title("☁️ Tải lên dữ liệu")
 st.sidebar.caption("Bạn có thể kéo thả nhiều tệp cùng lúc (여러 파일을 한 번에 드래그하세요)")
 
-# 멀티 파일 업로더만 남김 (기본 연도/월 선택 메뉴 삭제)
 uploaded_files = st.sidebar.file_uploader("Chọn tệp Excel (Kéo thả nhiều tệp)", type=['xlsx', 'xls'], accept_multiple_files=True)
 
-all_data = [] # 업로드된 모든 데이터를 임시로 담을 리스트
+all_data = [] 
 
 if uploaded_files:
     for uploaded_file in uploaded_files:
         try:
-            # 1. 파일명에서 연도/월 자동 추출 시도 (예: "tháng 01.2025")
+            # 1. 파일명에서 연도/월 자동 추출 시도
             match = re.search(r'tháng\s*(\d{1,2})\.?(\d{4})', uploaded_file.name.lower())
             if match:
                 file_month = int(match.group(1))
                 file_year = int(match.group(2))
             else:
-                # 못 찾을 경우 파일명 앞의 숫자 6자리(예: 202501)에서 추출 시도
                 alt_match = re.search(r'^(20\d{2})(\d{2})', uploaded_file.name)
                 if alt_match:
                     file_year = int(alt_match.group(1))
                     file_month = int(alt_match.group(2))
                 else:
                     file_month = 1
-                    file_year = 2025 # 기본값
+                    file_year = 2025
 
             # 2. 엑셀 파일 읽기
             xls = pd.ExcelFile(uploaded_file)
@@ -51,8 +49,11 @@ if uploaded_files:
                 df_inv.columns = ['unit', 'region', 'supermarket', 'product', 'qty']
                 df_inv['type'] = 'inventory'
 
-                # 병합 및 피벗
+                # 병합 및 피벗 (결측치는 'Khác'으로 채우고 모든 기준열을 문자로 강제 변환)
                 df_combined = pd.concat([df_sales, df_inv]).fillna('Khác')
+                for col in ['unit', 'region', 'supermarket', 'product']:
+                    df_combined[col] = df_combined[col].astype(str)
+
                 df_grouped = df_combined.pivot_table(
                     index=['unit', 'region', 'supermarket', 'product'], 
                     columns='type', values='qty', aggfunc='sum', fill_value=0
@@ -65,9 +66,8 @@ if uploaded_files:
                 df_grouped['year'] = file_year
                 df_grouped['month'] = file_month
 
-                # 리스트에 추가 (DB 저장 없음)
+                # 리스트에 추가 (성공 메시지 st.sidebar.success 제거)
                 all_data.append(df_grouped)
-                st.sidebar.success(f"✅ {uploaded_file.name} 처리 완료")
             else:
                 st.sidebar.error(f"❌ {uploaded_file.name}: Không tìm thấy sheet Bán/Tồn.")
         except Exception as e:
@@ -90,7 +90,8 @@ else:
     st.sidebar.title("🔍 Bộ lọc (필터)")
     
     def multiselect_filter(label, col_name):
-        options = sorted(df[col_name].unique())
+        # TypeError 해결: key=str을 추가하여 숫자와 문자가 섞여 있어도 안전하게 정렬되도록 수정
+        options = sorted(df[col_name].unique(), key=str)
         selected = st.sidebar.multiselect(label, options, default=[])
         return selected if selected else options
 
